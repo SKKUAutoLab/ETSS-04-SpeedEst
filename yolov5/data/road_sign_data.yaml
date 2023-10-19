@@ -1,0 +1,19 @@
+#"""
+#Created by Phan Hong Son
+#Uni: SKKU
+#File config to train yoloV5
+## Parameter
+#1. train, test, and val: Locations of train, test, and validation images.
+#2. nc: Number of classes in the dataset.
+#3. names: Names of the classes in the dataset. The index of the classes in this list would be used as an identifier for the class names in the code.
+#"""
+
+train: train_from_cratch/Road_Sign_Dataset/Data_processed_Road/images/train/
+val: train_from_cratch/Road_Sign_Dataset/Data_processed_Road/images/val/
+test: train_from_cratch/Road_Sign_Dataset/Data_processed_Road/images/test/
+
+# number of classes
+nc: 4
+
+# class names
+names: ["trafficlight","stop", "speedlimit","crosswalk"]
