@@ -1,4 +1,4 @@
-https://img.shields.io/github/downloads/SKKU-AutoLab-VSW/ETSS-01-Edge-TSS/total.svg
+https://img.shields.io/github/downloads/SKKU-AutoLab-VSW/ETSS-04-SpeedEst/total.svg
 
 
 
