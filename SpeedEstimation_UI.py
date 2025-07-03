@@ -419,28 +419,18 @@ def main(opt, filename, h_matrix, update_video):
                     online_im = plot_tracking(
                         im0, online_tlwhs, online_ids, frame_id=frame_id + 1, fps=30
                     )
-                    print("Pass tracking ===========> ")
-                    # # # # if frame_idx%2==0:
-                    # start = time.time()
-                    # # Call infer pose
-                    # list_pose = inferpose(im0, output_track)
-                    # total = time.time() - start
-                    # print("================total time: ", total)
+  
                     pose_thread.join()
                     list_pose = pose_thread.list_pose
 
                     # Call map pose and idx and it's bbox
                     mapped_pose = mapping_pose(list_pose, online_ids, online_tlwhs)
-                    print("=========>> mapped_pose: ", mapped_pose)
-                    print("=========>> online_ids: ", online_ids)
 
                     # DEBUG Deploy for write data to json
                     for i, id in enumerate(online_ids):
                         # condition to check whatever have bbox but haven't pose:
                         if id not in mapped_pose:
                             continue
-                        print("====> Id in add Track: ", id)
-                        print("====> len track list: ", len(track_list))
 
                         if len(track_list) == 0:
                             new_track = Track(online_tlwhs[i], mapped_pose[id], id, frame_id)
@@ -480,21 +470,6 @@ def main(opt, filename, h_matrix, update_video):
                         for track in track_list:
                             if track.id == id and track.speed > 0:
                                 cv2.putText(online_im, str("{0:,.2f}".format(track.speed)) + 'km/h', (int(mapped_pose[id][0]), int(mapped_pose[id][1])), cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 255), 2)
-
-
-                        # #DEBUG for draw trajectory
-                        #     # Save centroid to distionary
-                        #     if id in centroids.keys():
-                        #         centroids[id].append(mapped_pose[id])
-                        #     else:
-                        #         centroids[id] = [mapped_pose[id]]
-
-                    # # Draw the trajectory of centroid
-                    # for id in centroids.keys():
-                    #     for c in range(1, len(centroids[id])):
-                    #         if centroids[id][c - 1] is None or centroids[id][c] is None:
-                    #             continue
-                    #         cv2.line(online_im, centroids[id][c - 1], centroids[id][c], (0, 0, 255), 2)
 
 
                     # Call to write json file when accepted
@@ -548,10 +523,7 @@ def main(opt, filename, h_matrix, update_video):
                     vid_writer[0] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), fps, (w, h))
                 vid_writer[0].write(online_im)
 
-        # # Debug
-        # totalTime = time.time() - startTime
-        # fps = 1 / totalTime
-        # print("FPS: {:.2f}".format(fps))
+
     print("============================= FINISH =============================")
     output_dir = "Output_result/{}".format(filename.split("/")[-2])
     if not os.path.exists(output_dir):
@@ -559,11 +531,6 @@ def main(opt, filename, h_matrix, update_video):
     out_file = osp.join(output_dir, "system_PSE.json")
     with open(out_file, "w") as f:
         json.dump(json_structure, f)
-
-    # # write result to json
-    # flag_cap = dataset.get_cap()
-    # print("this is flag cap: ", flag_cap)
-    # write_result(flag_cap)
 
 # Fuction subport speed
 def speed_estimation_inside(track, H):
@@ -575,7 +542,7 @@ def speed_estimation_inside(track, H):
     distance = math.sqrt(np.sum(np.square(getWorldPoint(endPoint, H)[0:2]/getWorldPoint(endPoint, H)[2]- getWorldPoint(startPoint, H)[0:2]/getWorldPoint(startPoint, H)[2])))
     print('This is world point {} and {} '.format(getWorldPoint(endPoint, H)[0:2], getWorldPoint(startPoint, H)[0:2]))
     print('This is distance: ', distance)
-    return distance*0.94656/ elapsedTime * 3.6
+    return distance/ elapsedTime * 3.6
 
 def getWorldPoint(point, H):
     return np.dot(H, point)
