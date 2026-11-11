@@ -2,68 +2,51 @@
 Copy-Right by: PHAN HONG SON
 Univ: Sungkyunkwan University
 """
-# limit the number of cpus used by high performance libraries
-import os
-import numpy as np
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-import math
-import sys
-import os.path as osp
-import argparse
-import shutil
-import time
 import cv2
-import torch
-import json
-import torch.backends.cudnn as cudnn
-from supportSpeed.support_speed_estimation import draw_traject, speed_estimation, mapping_pose, map_detection, write_result
-from supportSpeed.support_multithread_online import *
-from loguru import logger
-from pathlib import Path
-# Son deploy multithreading for  speed up Performent
-import threading
-from PyQt6 import QtCore
-
+from ultralytics import YOLO
+import numpy as np
+import sys
 # join path
-sys.path.insert(0, './yolov5')
-# sys.path.insert(0, './mmposeLink/mmpose')
-
-from yolox.data.data_augment import preproc
-from yolox.utils import fuse_model, get_model_info, postprocess
+sys.path.insert(0, '.')
+import time
+import math
+import torch
 from yolox.utils.visualize import plot_tracking
 from yolox.tracker.byte_tracker import BYTETracker
-from yolox.tracking_utils.timer import Timer
+import argparse
+import os.path as osp
+import json
+import os
+from support.position_confix import Vps, Hmatrixs
 
-# Son Implement for YoloV5
-from yolov5.models.experimental import attempt_load
-from yolov5.utils.downloads import attempt_download
-from yolov5.models.common import DetectMultiBackend
-from yolov5.utils.datasets import LoadImages, LoadStreams, VID_FORMATS
-from yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords,
-                                  check_imshow, xyxy2xywh, increment_path, strip_optimizer, colorstr)
-from yolov5.utils.torch_utils import select_device, time_sync
-from yolov5.utils.plots import Annotator, colors, save_one_box
+def make_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
+    parser.add_argument('--deep_sort_model', type=str, default='osnet_x0_25')
+    parser.add_argument('--source', type=str, default='0', help='source')  # file/folder, 0 for webcam
+    parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
+    parser.add_argument('--conf-thres', type=float, default=0.5, help='object confidence threshold')
+    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
+    parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
+    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--show-vid', action='store_true', help='display tracking video results')
+    parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
+    parser.add_argument('--save-txt', action='store_true', help='save MOT compliant results to *.txt')
 
-from config_pose_for_speed.inferpose import inference_top_down_pose_model, init_pose_model
-# from mmposeLink.mmpose.mmpose.apis import (inference_top_down_pose_model, init_pose_model,
-#                          vis_pose_result, process_mmdet_results)
-from mmdet.apis import inference_detector, init_detector
-from position_confix import Vps
+    # tracking args
+    parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
+    parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
+    parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
+    parser.add_argument("--aspect_ratio_thresh", type=float, default=1.6,help="threshold for filtering out boxes of which aspect ratio are above the given value.")
+    parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
+    parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    # Json args
+    parser.add_argument("--json_path", type=str, default="result_detection/result", help="json file path")
+    opt = parser.parse_args()
+    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    return opt
 
-local_runtime = False
-
-
-
-
-FILE = Path(__file__).resolve()
-ROOT = FILE.parents[0]  # yolov5 deepsort root directory
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))  # add ROOT to PATH
-ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 # Define a zone to traking
 dict_area_track = {
@@ -92,50 +75,11 @@ dict_area_track = {
 "session6_right": [(1098, 98), (1801, 95), (1723, 779), (168, 678)],# ===> session6_right
 }
 
-# Config file to load model to infer Pose
-pose_config = 'config_pose_for_speed/custom_config.py' #'mmposeLink/mmpose/configs/CarCornerConfig/my_custom_config.py'#'config_pose_for_speed/custom_config.py'
-pose_checkpoint = 'mmposeLink/mmpose/BackupPre-Train/License_Us/epoch_33.pth' #'mmposeLink/mmpose/work_dirs/my_custom_config_60_Epochs/epoch_52.pth' #../../../../media/sonskku/DATA_2/BackupPre-Train/my_custom_config_center/epoch_30.pth' #'mmposeLink/mmpose/BackupPre-Train/License_Us/epoch_33.pth'#mmposeLink/mmpose/work_dirs/my_custom_config_60_Epochs/epoch_60.pth' #' '
 
-
-json_structure = {'cars': [], 'camera_calibration': {}}
-
-# Dist for draw trajectory
-centroids = {}
-
-# initialize pose model
-pose_model = init_pose_model(pose_config, pose_checkpoint)
-class PoseThread(threading.Thread):
-    def __init__(self, image, boxs):
-        threading.Thread.__init__(self)
-        self.list_pose = None
-        self.img = image
-        self.boxs = boxs
-
-    def run(self):
-        self.list_pose = self.inferpose(self.img, self.boxs)
-
-    def inferpose(self, image, boxs):
-        pose_list = []
-        result_boxs = []
-        img = image
-        for box in boxs:
-            result_boxs.append({'bbox': box})
-        # inference pose
-        pose_results, returned_outputs = inference_top_down_pose_model(
-            pose_model,
-            img,
-            result_boxs,
-            bbox_thr=0.3,
-            format='xyxy',
-            dataset=pose_model.cfg.data.test.type)
-        # Save result in a tuple
-        for i in range(len(pose_results)):
-            pose_list.append((pose_results[i]['keypoints'][0][0], pose_results[i]['keypoints'][0][1]))
-        return pose_list
 # Define class Track for support Witer data to evaluate in Brnocompspeed
 class Track:
     def __init__(self, box, pose, id, frame):
-        print("Call Initialize")
+        # print("Call Initialize")
         self.boxs = [box]
         self.poses = [pose]
         self.id = id
@@ -154,377 +98,228 @@ class Track:
 
     def check_misses(self, keeping_time):
         self.missing += 1
-        print("===> Call check miss of id: {} with missing number {}: ".format(self.id,  self.missing))
+        # print("===> Call check miss of id: {} with missing number {}: ".format(self.id,  self.missing))
         return self.missing > keeping_time
-def addEntry(track):
-    if len(track.frames) < 5:
-        return
-    frames = []
-    posX = []
-    posY = []
-    print("====>Call  addRecord")
-    for frame, pose, box in zip(track.frames, track.poses, track.boxs):
-        posX.append(float(pose[0]))
-        posY.append(float(pose[1]))
-        frames.append(frame)
 
-    if len(frames) < 5:
-        return
 
-    dist = math.sqrt(math.pow(posX[0] - posX[-1], 2) + math.pow(posY[0] - posY[-1], 2))
-    if dist > 30:
-        entry = {'frames': track.frames, 'id': track.id, 'posX': posX, 'posY': posY}
-        print("=======> entry: ", entry)
-        json_structure['cars'].append(entry)
 
-def remove(list_track, list_ids):
-    for i in reversed([i for (i, track) in enumerate(list_track) if track.check_misses(5)]):
-        print("========> Call remove")
-        addEntry(list_track[i])
-        del list_track[i]
-        del list_ids[i]
+# Load the model (ensure it supports car detection)
+model = YOLO("pretrain/bests.pt")
+# model = YOLO("yolo11s.pt")
 
-def make_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--yolo_model', nargs='+', type=str, default='yolov5m.pt', help='model.pt path(s)')
-    parser.add_argument('--deep_sort_model', type=str, default='osnet_x0_25')
-    parser.add_argument('--source', type=str, default='0', help='source')  # file/folder, 0 for webcam
-    parser.add_argument('--output', type=str, default='inference/output', help='output folder')  # output folder
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.5, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
-    parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--show-vid', action='store_true', default=[True], help='display tracking video results')
-    parser.add_argument('--save-vid', action='store_true', help='save video tracking results')
-    parser.add_argument('--save-txt', action='store_true', help='save MOT compliant results to *.txt')
-    # class 0 is person, 1 is bycicle, 2 is car... 79 is oven
-    parser.add_argument('--classes', nargs='+', type=int, default=[2], help='filter by class: --class 0, or --class 16 17')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--evaluate', action='store_true', help='augmented inference')
-    parser.add_argument("--config_deepsort", type=str, default="deep_sort/configs/deep_sort.yaml")
-    parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
-    parser.add_argument('--visualize', action='store_true', help='visualize features')
-    parser.add_argument('--max-det', type=int, default=1000, help='maximum detection per image')
-    parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
-    parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-    parser.add_argument('--project', default=ROOT / 'runs/track', help='save results to project/name')
-    parser.add_argument('--name', default='exp', help='save results to project/name')
-    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    # tracking args
-    parser.add_argument("--track_thresh", type=float, default=0.5, help="tracking confidence threshold")
-    parser.add_argument("--track_buffer", type=int, default=30, help="the frames for keep lost tracks")
-    parser.add_argument("--match_thresh", type=float, default=0.8, help="matching threshold for tracking")
-    parser.add_argument("--aspect_ratio_thresh", type=float, default=1.6,help="threshold for filtering out boxes of which aspect ratio are above the given value.")
-    parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
-    parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
-    # Json args
-    parser.add_argument("--json_path", type=str, default="result_detection/result", help="json file path")
-    opt = parser.parse_args()
-    opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
-    return opt
 
 def main(opt, filename, h_matrix, update_video):
-    out, yolo_model, deep_sort_model, show_vid, save_vid, save_txt, imgsz, evaluate, half, \
-    project, exist_ok, update, save_crop = \
-        opt.output, opt.yolo_model, opt.deep_sort_model, opt.show_vid, opt.save_vid, \
-        opt.save_txt, [1920,1080], opt.evaluate, opt.half, opt.project, opt.exist_ok, opt.update, opt.save_crop
-    #SONDEBUG
+    # Open the video file
+    video_path = filename
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise IOError(f"Cannot open video file: {video_path}")
+    #get area coords from dict_area_track
+    area_coords = np.array(dict_area_track[filename.split("/")[-2]], dtype=np.int32)
 
+    # Define json structure
+    json_structure = {'cars': [], 'camera_calibration': {}}
     json_structure["camera_calibration"] = Vps[filename.split("/")[-2]]['camera_calibration']
     homo_matrix = h_matrix
-    source = filename #"../Datasets/brnocompspeed/data/2016-ITS-BrnoCompSpeed/dataset/session1_left/video.avi"
-    webcam = source == '0' or source.startswith(
-        'rtsp') or source.startswith('http') or source.endswith('.txt')
-    #get area to tracking
-    area_track = dict_area_track[filename.split("/")[-2]]
-
-    # Initialize
-    device = select_device(opt.device)
-    half &= device.type != 'cpu'  # half precision only supported on CUDA
-
-    # The MOT16 evaluation runs multiple inference streams in parallel, each one writing to
-    # its own .txt file. Hence, in that case, the output folder is not restored
-    if not evaluate:
-        if os.path.exists(out):
-            pass
-            shutil.rmtree(out)  # delete output folder
-        os.makedirs(out)  # make new output folder
-
-    # Directories
-    if type(yolo_model) is str:  # single yolo model
-        exp_name = yolo_model.split(".")[0]
-    elif type(yolo_model) is list and len(yolo_model) == 1:  # single models after --yolo_model
-        exp_name = yolo_model[0].split(".")[0]
-    else:  # multiple models after --yolo_model
-        exp_name = "ensemble"
-    exp_name = exp_name + "_" + deep_sort_model.split('/')[-1].split('.')[0]
-    save_dir = increment_path(Path(project) / exp_name, exist_ok=exist_ok)  # increment run if project name exists
-    (save_dir / 'tracks' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-
-    # Load model
-    model = DetectMultiBackend(yolo_model, device=device, dnn=opt.dnn)
-    stride, names, pt = model.stride, model.names, model.pt
-    print("=========This is image size Before=======: ", imgsz)
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
-    print("This is image size: ", imgsz)
-
-    # Half
-    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt:
-        model.model.half() if half else model.model.float()
-
-    # Set Dataloader
-    vid_path, vid_writer = None, None
-    # Check if environment supports image displays
-    # if show_vid:
-    #     show_vid = check_imshow()
-
-    # Dataloader
-    if webcam:
-        show_vid = check_imshow()
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
-        nr_sources = len(dataset)
-    else:
-        print('++++ Pass video')
-        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
-        nr_sources = 1
-    vid_path, vid_writer, txt_path = [None] * nr_sources, [None] * nr_sources, [None] * nr_sources
 
 
-    # Get names and colors
-    names = model.module.names if hasattr(model, 'module') else model.names
+    def addEntry(track):
+        if len(track.frames) < 5:
+            return
+        frames = []
+        posX = []
+        posY = []
+        # print("====>Call  addRecord")
+        for frame, pose, box in zip(track.frames, track.poses, track.boxs):
+            posX.append(float(pose[0]))
+            posY.append(float(pose[1]))
+            frames.append(frame)
 
-    # Run tracking
-    print("================Phan Hong Son 9999 ===============")
-    model.warmup(imgsz=(1 if pt else nr_sources, 3, *imgsz))  # warmup
-    dt, seen = [0.0, 0.0, 0.0, 0.0], 0
-    # Son Define Init Bye track
-    tracker = BYTETracker(opt, frame_rate=30)
-    # timer = Timer()
-    frame_id = 0
+        if len(frames) < 5:
+            return
+
+        dist = math.sqrt(math.pow(posX[0] - posX[-1], 2) + math.pow(posY[0] - posY[-1], 2))
+        if dist > 30:
+            entry = {'frames': track.frames, 'id': track.id, 'posX': posX, 'posY': posY}
+            # print("=======> entry: ", entry)
+            json_structure['cars'].append(entry)
+
+    def remove(list_track, list_ids):
+        for i in reversed([i for (i, track) in enumerate(list_track) if track.check_misses(5)]):
+            # print("========> Call remove")
+            addEntry(list_track[i])
+            del list_track[i]
+            del list_ids[i]
+
+    def speed_estimation_inside(track, H):
+        startFrame = track.frames[0]
+        endFrame = track.frames[-1]
+        fps = 50
+        elapsedTime = abs(endFrame - startFrame) / fps
+        startPoint = np.array([track.poses[0][0], track.poses[0][1], 1])
+        endPoint = np.array([track.poses[-1][0], track.poses[-1][1], 1])
+        distance = math.sqrt(np.sum(np.square(getWorldPoint(endPoint, H)[0:2]/getWorldPoint(endPoint, H)[2]- getWorldPoint(startPoint, H)[0:2]/getWorldPoint(startPoint, H)[2])))
+        return distance/ elapsedTime * 3.6
+    
+    def getWorldPoint(point, H):
+        return np.dot(H, point)
+    
+    # Some Define intialize
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tracker = BYTETracker(opt,frame_rate=50)
     results = []
+    track_list = []
     list_ids = []
-    track_list = [] # this value was use for write data to json
+    frame_id = 0
+    info_img = [height, width]
+    img_size = (height, width)
+    zone_mask = None
 
-    # with open('result_detection/results/Asave/session4_left/system_PSE.json') as json_file:
-    #     data = json.load(json_file) # File to get calibrate info
+     # === Add this block to set up VideoWriter ===
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    output_dir = "Output_result/{}".format(filename.split("/")[-2])
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    # out_video_path = osp.join(output_dir, "result.mp4")
+    # fps = cap.get(cv2.CAP_PROP_FPS)
+    # width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    # height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # video_writer = cv2.VideoWriter(out_video_path, fourcc, fps, (width, height))
 
-    for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
-        startTime = time.time()
-        # t1 = time_sync()
-        im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
-        im /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim
-        # t2 = time_sync()
-        # dt[0] += t2 - t1
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
+        start_time = time.time()
 
-        # Inference
-        visualize = increment_path(save_dir / Path(path[0]).stem, mkdir=True) if opt.visualize else False
-        pred = model(im, augment=opt.augment, visualize=visualize)
-        # t3 = time_sync()
-        # dt[1] += t3 - t2
+        if zone_mask is None:
+            frame_h, frame_w = frame.shape[:2]
+            zone_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+            cv2.fillPoly(zone_mask, [area_coords], 1)
 
-        # Apply NMS
-        pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms,
-                                   max_det=opt.max_det)
-        # dt[2] += time_sync() - t3
+        # Perform tracking on the frame, filtering for cars (class index 2)
+        results = model(frame,verbose=False)
 
-        # Process detections
-        for i, det in enumerate(pred):  # detections per image
-            seen += 1
-            if webcam:  # nr_sources >= 1
-                p, im0, _ = path[i], im0s[i].copy(), dataset.count
-                p = Path(p)  # to Path
-                s += f'{i}: '
-                txt_file_name = p.name
-                save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-            else:
-                p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
-                p = Path(p)  # to Path
-                # video file
-                if source.endswith(VID_FORMATS):
-                    txt_file_name = p.stem
-                    save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-                # folder with imgs
-                else:
-                    txt_file_name = p.parent.name  # get folder name containing current img
-                    save_path = str(save_dir / p.parent.name)  # im.jpg, vid.mp4, ...
+        # filter boxes in the area_coords
+        in_boxs = {}
+        filtered_boxes = []
+        filtered_cls = []
+        for r in results:
+            boxes = r.boxes
+            if boxes is None or boxes.shape[0] == 0:
+                continue
 
-            txt_path = str(save_dir / 'tracks' / txt_file_name)  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
-            imc = im0.copy() if save_crop else im0  # for save_crop
+            boxes_xyxy = boxes.xyxy.cpu().numpy()
+            confidences = boxes.conf.cpu().numpy()
+            classes = boxes.cls.cpu().numpy().astype(int)
 
-            annotator = Annotator(im0, line_width=2, pil=not ascii)
+            centers_x = ((boxes_xyxy[:, 0] + boxes_xyxy[:, 2]) * 0.5).astype(np.int32)
+            centers_y = ((boxes_xyxy[:, 1] + boxes_xyxy[:, 3]) * 0.5).astype(np.int32)
+            centers_x = np.clip(centers_x, 0, zone_mask.shape[1] - 1)
+            centers_y = np.clip(centers_y, 0, zone_mask.shape[0] - 1)
 
-            if det is not None and len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+            inside_mask = zone_mask[centers_y, centers_x] > 0
+            if not np.any(inside_mask):
+                continue
 
-                output = det[:, 0:5]
-                output = output.cpu().numpy()
-                confs = det[:, 4]
-                clss = det[:, 5]
-
-                # DEBUG filter box in a zone_track  ==> Track it
-                output_track = []
-                for box in output:
-                    x_min,y_min,x_max,y_max = box[0],box[1],box[2],box[3]
-                    centroid = (np.float32(x_min/2 + x_max/2), np.float32(y_min/2 + y_max/2))
-                    flag = cv2.pointPolygonTest(np.array(area_track, np.int32), centroid, False)
-                    if flag>=0:
-                        #DEBUG Extended box and add to output_track
-                        box1 = np.array([x_min-10,y_min-10,x_max+10,y_max+10,box[4]])
-                        # print('This is box: ', box)
-                        output_track.append(box1)
-
-                output_track = np.array(output_track)
-
-
-                # print("===========This is output_track=======>: ", output_track)
-                # Create the inference pose thread
-                pose_thread = PoseThread(im0, output_track)
-                pose_thread.start()
-
-                info_img = [im0.shape[0], im0.shape[1]]
-                img_size =(im0.shape[0], im0.shape[1])
-                if len(output_track) > 0:
-                    # Son Start apply Bye Track
-                    online_targets = tracker.update(output_track, info_img, img_size)
-                    online_tlwhs = []
-                    online_ids = []
-                    online_scores = []
-                    for t in online_targets:
-                        tlwh = t.tlwh
-                        tid = t.track_id
-                        vertical = tlwh[2] / tlwh[3] > opt.aspect_ratio_thresh
-                        if tlwh[2] * tlwh[3] > opt.min_box_area and not vertical:
-                            online_tlwhs.append(tlwh)
-                            online_ids.append(tid)
-                            online_scores.append(t.score)
-                            results.append(
-                                f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
-                            )
-                    # timer.toc()
-                    # Plot traking result
-                    online_im = plot_tracking(
-                        im0, online_tlwhs, online_ids, frame_id=frame_id + 1, fps=30
+            xyxy_inside = boxes_xyxy[inside_mask]
+            conf_inside = confidences[inside_mask][:, None]
+            filtered_boxes.extend(np.hstack((xyxy_inside, conf_inside)))
+            filtered_cls.extend(classes[inside_mask].tolist())
+            
+                    
+        filtered_boxes = np.array(filtered_boxes)
+        in_boxs['filtered_boxes'] = filtered_boxes
+        in_boxs['class'] = filtered_cls
+        # print("in_boxs: ", in_boxs)
+        
+        # Apply ByteTrack Tracking
+        if len(filtered_boxes) > 0:
+            online_targets = tracker.update(filtered_boxes, info_img, img_size)
+            online_tlwhs = []
+            online_ids = []
+            online_scores = []
+            for t in online_targets:
+                tlwh = t.tlwh
+                tid = t.track_id
+                vertical = tlwh[2] / tlwh[3] > opt.aspect_ratio_thresh
+                if tlwh[2] * tlwh[3] > opt.min_box_area and not vertical:
+                    online_tlwhs.append(tlwh)
+                    online_ids.append(tid)
+                    online_scores.append(t.score)
+                    results.append(
+                        f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
                     )
-  
-                    pose_thread.join()
-                    list_pose = pose_thread.list_pose
+            # Plot traking result
+            end_time = time.time()
+            fps = 1 / (end_time - start_time)
+            online_im = plot_tracking(frame, online_tlwhs, online_ids, frame_id=frame_id + 1, fps=fps)
 
-                    # Call map pose and idx and it's bbox
-                    mapped_pose = mapping_pose(list_pose, online_ids, online_tlwhs)
-
-                    # DEBUG Deploy for write data to json
-                    for i, id in enumerate(online_ids):
-                        # condition to check whatever have bbox but haven't pose:
-                        if id not in mapped_pose:
+            # DEBUG Deploy for write data to json
+            for i, id in enumerate(online_ids):
+                if len(track_list) == 0:
+                    # Calculate the midpoint of the bottom edge of the bounding box
+                    x, y, w, h = online_tlwhs[i]
+                    midpoint = (x + w / 2, y + h)
+                    new_track = Track(online_tlwhs[i], midpoint, id, frame_id)
+                    track_list.append(new_track)
+                    list_ids.append(id)
+                    continue
+                for track in track_list:
+                    if id in list_ids:
+                        if id == track.id:
+                            # Calculate the midpoint of the bottom edge of the bounding box
+                            x, y, w, h = online_tlwhs[i]
+                            midpoint = (x + w / 2, y + h)
+                            track.assign_info(online_tlwhs[i], frame_id, midpoint)
+                        else:
                             continue
+                    else:
+                        list_ids.append(id)
+                        # Calculate the midpoint of the bottom edge of the bounding box
+                        x, y, w, h = online_tlwhs[i]
+                        midpoint = (x + w / 2, y + h)
+                        new_track = Track(online_tlwhs[i], midpoint, id, frame_id)
+                        track_list.append(new_track)
+                        break  # prevent the loop from hitting the newly-added track and calling assign_info again
 
-                        if len(track_list) == 0:
-                            new_track = Track(online_tlwhs[i], mapped_pose[id], id, frame_id)
-                            track_list.append(new_track)
-                            list_ids.append(id)
-                            continue
-                        for track in track_list:
-                            if id in list_ids:
-                                if id == track.id:
-                                    track.assign_info(online_tlwhs[i], frame_id, mapped_pose[id])
-                                else:
-                                    continue
-                            else:
-                                # print("=========> pass here: ", id)
-                                list_ids.append(id)
-                                new_track = Track(online_tlwhs[i], mapped_pose[id], id, frame_id)
-                                track_list.append(new_track)
-                    print("===> List id: ", list_ids)
-                    # print("=========>> track_list: ", track_list)
-                    #
-                    #DEBUG Call calculate speed for each track
-                    for track in track_list:
-                        print('This is track: ', track.id)
-                        if track.frames[-1] - track.frames[0] == 20:
-                            print('==> This is track: ', track.id)
-                            # speed = calculateSpeeds(data, track)
-                            #DEBUG
-                            speed = speed_estimation_inside(track, homo_matrix)
-                            print('This is  speed of car: ', speed)
-                            track.assign_speed(speed)
-                    for id in list_ids:
-                        print('This is list id: ', list_ids)
-                        if id not in mapped_pose:
-                            continue
-                        print('this is pose: {} of id: {} '.format(mapped_pose[id], id))
-                        # cv2.circle(online_im, mapped_pose[id], 5, (0, 0, 255), -1) #Draw pose
-                        for track in track_list:
-                            if track.id == id and track.speed > 0:
-                                cv2.putText(online_im, str("{0:,.2f}".format(track.speed)) + 'km/h', (int(mapped_pose[id][0]), int(mapped_pose[id][1])), cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 255), 2)
+                 #DEBUG Call calculate speed for each track
+                for track in track_list:
+                    if track.frames[-1] - track.frames[0] == 15:
+                        speed = speed_estimation_inside(track, homo_matrix)
+                        track.assign_speed(speed)
+                for track in track_list:
+                    if len(track.poses) == 0:
+                        continue
 
+                    # Draw the latest midpoint of each tracked object.
+                    current_midpoint = track.poses[-1]
+                    cv2.circle(online_im, (int(current_midpoint[0]), int(current_midpoint[1])), 6, (0, 0, 255), -1)
 
-                    # Call to write json file when accepted
-                    remove(track_list, list_ids)
+                    if track.speed > 0:
+                        cv2.putText(online_im, str("{0:,.2f}".format(track.speed)) + 'km/h', (int(current_midpoint[0]), int(current_midpoint[1])), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 10)
+                        cv2.putText(online_im, str("{0:,.2f}".format(track.speed)) + 'km/h', (int(current_midpoint[0]), int(current_midpoint[1])), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 255), 2)
 
+                remove(track_list, list_ids)
+        else:
+            online_im = frame # insert for case output_track = [None]
+    
+        # draw area_coords on the frame
+        result_im = cv2.polylines(online_im, [area_coords], isClosed=True, color=(0, 255, 0), thickness=2)
 
-                else:
-                    online_im = im0  #  insert in case output_track = [None]
-            else:
-                online_im = im0 ##  insert in case det = [None]
+        # Update image to signal
+        update_video.emit({
+            "image": result_im,
+            "finish": False
+        }) 
+        
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+        
+        frame_id += 1
 
-            # Debug
-            totalTime = time.time() - startTime
-            fps = 1 / totalTime
-            print("FPS: {:.2f}".format(fps))
-
-            #DEBUG draw zone_track area
-            cv2.polylines(online_im, [np.array(area_track, np.int32)], True, (0, 255, 0), 3)
-
-
-            frame_id += 1
-            # Son End Bye Track
-            # Stream results
-            im0 = annotator.result()
-            # Update image to signal
-            update_video.emit({
-                "image": online_im
-            })
-
-            # if show_vid:
-            #     cv2.imshow(str(p), online_im)
-            #     cv2.waitKey(1)  # 1 millisecond
-
-            # Save results (image with detections)
-            if save_vid:
-                print('This is save path',save_path)
-                print('This is vid path',len(vid_path))
-                if vid_path[0] != save_path:  # new video
-                    print("Phan Hong Son")
-                    vid_path[0] = save_path
-                    if isinstance(vid_writer[0], cv2.VideoWriter):
-                        vid_writer[0].release()  # release previous video writer
-                    if vid_cap:  # video
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    else:  # stream
-                        fps, w, h = 50, online_im.shape[1], online_im.shape[0]
-                    save_path = str(Path(save_path).with_suffix('.avi'))  # force *.mp4 suffix on results videos
-                    # vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer[0] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'), fps, (w, h))
-                vid_writer[0].write(online_im)
-
-
-    print("============================= FINISH =============================")
+    print("============================= Call write to Json =============================")
     output_dir = "Output_result/{}".format(filename.split("/")[-2])
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -532,21 +327,10 @@ def main(opt, filename, h_matrix, update_video):
     with open(out_file, "w") as f:
         json.dump(json_structure, f)
 
-# Fuction subport speed
-def speed_estimation_inside(track, H):
-    startFrame = track.frames[0]
-    endFrame = track.frames[-1]
-    elapsedTime = abs(endFrame - startFrame) / fps
-    startPoint = np.array([track.poses[0][0], track.poses[0][1], 1])
-    endPoint = np.array([track.poses[-1][0], track.poses[-1][1], 1])
-    distance = math.sqrt(np.sum(np.square(getWorldPoint(endPoint, H)[0:2]/getWorldPoint(endPoint, H)[2]- getWorldPoint(startPoint, H)[0:2]/getWorldPoint(startPoint, H)[2])))
-    print('This is world point {} and {} '.format(getWorldPoint(endPoint, H)[0:2], getWorldPoint(startPoint, H)[0:2]))
-    print('This is distance: ', distance)
-    return distance/ elapsedTime * 3.6
-
-def getWorldPoint(point, H):
-    return np.dot(H, point)
+    cap.release()
+    cv2.destroyAllWindows()
 
 def speedEstimation(filename, matrix, update_video):
     opt = make_parser()
     main(opt, filename, matrix, update_video)
+

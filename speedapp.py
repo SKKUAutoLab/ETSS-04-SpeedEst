@@ -13,9 +13,9 @@ import numpy as np
 from skimage import io
 import cv2
 from PyQt6 import QtCore, QtGui, QtWidgets
-from position_confix import pairs
+from support.position_confix import pairs
 from SpeedEstimation_UI import speedEstimation
-from SpeedEstimation_UI_Run_All import speedEstimationAll_1
+from runSpeedAll import speedEstimationAll_1
 
 
 NUMBER_THREAD = [1,2,3,4]
@@ -38,10 +38,10 @@ class RunAllProccess(QtCore.QThread):
     def run(self):
         if self.thread_number == 1:
             speedEstimationAll_1(self.update_status)
-        # elif self.thread_number == 2:
-        #     speedEstimationAll_2(self.update_status)
-        # elif self.thread_number == 3:
-        #     speedEstimationAll_3(self.update_status)
+        elif self.thread_number == 2:
+            speedEstimationAll_2(self.update_status)
+        elif self.thread_number == 3:
+            speedEstimationAll_3(self.update_status)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
@@ -270,7 +270,7 @@ class Ui_MainWindow(object):
         self.button_point4_world.setText(_translate("MainWindow", "Point 4"))
         self.LoadVideo.setText(_translate("MainWindow", "Load Video"))
         self.Dashboad.setText(_translate("MainWindow", "Dashboard"))
-        self.Capture.setText(_translate("MainWindow", "Capture"))
+        self.Capture.setText(_translate("MainWindow", "Play"))
         self.Calibrate.setText(_translate("MainWindow", "Calibrate"))
         self.Run_All.setText(_translate("MainWindow", "Run All"))
         self.SpeedEstimation.setText(_translate("MainWindow", "Speed Est"))
@@ -388,35 +388,37 @@ class Ui_MainWindow(object):
         global point3_world
         global point4_world
         global filename
+        try:
+            if self.flag_get_point == True:
+                print("This error for get point by hand")
 
-        if self.flag_get_point == True:
-            print("This error for get point by hand")
+                #convert point  from string to array
+                line_1 = self.str2int(point1_world)
+                line_2 = self.str2int(point2_world)
+                line_3 = self.str2int(point3_world)
+                line_4 = self.str2int(point4_world)
 
-            #convert point  from string to array
-            line_1 = self.str2int(point1_world)
-            line_2 = self.str2int(point2_world)
-            line_3 = self.str2int(point3_world)
-            line_4 = self.str2int(point4_world)
-
-            source_points = np.array([
-                [x_1, y_1],
-                [x_2, y_2],
-                [x_3, y_3],
-                [x_4, y_4]
-            ])
-            destination_points = np.array([
-                line_1,
-                line_2,
-                line_3,
-                line_4
-            ])
-        else:
-            #get point by video
-            source_points = pairs[filename.split("/")[-2]]["source_points"]
-            destination_points = pairs[filename.split("/")[-2]]["destination_points"]
-        matrix = getHomography(source_points, destination_points)
-        self.label_show_guide.setText("Homography matrix for {}: ".format(filename.split("/")[-2]) + "\n" + "\n" + str(matrix))
-        return matrix
+                source_points = np.array([
+                    [x_1, y_1],
+                    [x_2, y_2],
+                    [x_3, y_3],
+                    [x_4, y_4]
+                ])
+                destination_points = np.array([
+                    line_1,
+                    line_2,
+                    line_3,
+                    line_4
+                ])
+            else:
+                #get point by video
+                source_points = pairs[filename.split("/")[-2]]["source_points"]
+                destination_points = pairs[filename.split("/")[-2]]["destination_points"]
+            matrix = getHomography(source_points, destination_points)
+            self.label_show_guide.setText("Homography matrix for {}: ".format(filename.split("/")[-2]) + "\n" + "\n" + str(matrix))
+            return matrix
+        except NameError:
+            self.label_show_guide.setText("Please insert 4 pair points to calibrate camera")
 
     def str2int(self, points):
         try:
@@ -431,8 +433,12 @@ class Ui_MainWindow(object):
             print("Please insert the world point condinate")
     def loadVideo(self):
         global filename
+        global rows_prop
+        global cols_prop
         self.flag_get_point = False
-        filename = QtWidgets.QFileDialog.getOpenFileName(self.centralwidget, "Open Video", "", "*.avi;; *.mp4;;All Files(*)")[0]
+        filename = QtWidgets.QFileDialog.getOpenFileName(self.centralwidget, "Open Video", "", "*.mp4;;All Files(*)")[0]
+        if not filename:
+            return
         print("This is link file: ", filename)
         # print("This is file name: ", filename.split("/")[-2])
         print("This is Position in source: ", pairs[filename.split("/")[-2]])
@@ -459,6 +465,37 @@ class Ui_MainWindow(object):
                                       + "Opt 2: If not. Please press [Calibrate] to get homography matrix"
                                       )
 
+        # Display first frame with a play icon overlay
+        cap = cv2.VideoCapture(filename)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            rows_prop = frame.shape[0] / self.WindowShowVideo.height()
+            cols_prop = frame.shape[1] / self.WindowShowVideo.width()
+
+            # Draw semi-transparent circle + white triangle (play icon)
+            h, w = frame.shape[:2]
+            cx, cy = w // 2, h // 2
+            radius = min(w, h) // 8
+
+            overlay = frame.copy()
+            cv2.circle(overlay, (cx, cy), radius, (30, 30, 30), -1)
+            cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+
+            tri_pts = np.array([
+                [cx - radius // 3,          cy - int(radius * 0.55)],
+                [cx - radius // 3,          cy + int(radius * 0.55)],
+                [cx + int(radius * 0.65),   cy],
+            ], np.int32)
+            cv2.fillPoly(frame, [tri_pts], (255, 255, 255))
+
+            display = cv2.resize(frame, (self.WindowShowVideo.width(), self.WindowShowVideo.height()),
+                                 interpolation=cv2.INTER_AREA)
+            display = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+            qimg = QtGui.QImage(display, display.shape[1], display.shape[0],
+                                display.strides[0], QtGui.QImage.Format.Format_RGB888)
+            self.WindowShowVideo.setPixmap(QtGui.QPixmap.fromImage(qimg))
+
     # def speed_Cal(self):
     #     global filename
     #     matrix = self.calibrate()
@@ -466,10 +503,14 @@ class Ui_MainWindow(object):
     #     speedEstimation(filename, matrix)
     def speed_Cal(self):
         global filename
-        matrix = self.calibrate()
-        self.video_process = videoProcess(filename, matrix)
-        self.video_process.start()
-        self.video_process.update_video.connect(self.updateImage)
+        try:
+            matrix = self.calibrate()
+            self.video_process = videoProcess(filename, matrix)
+            self.video_process.start()
+            self.video_process.update_video.connect(self.updateImage)
+        except Exception as e:
+            self.label_show_guide.setText("Make sure the video was loaded correctly." + "\n" + "\n" "and the calibration matrix is valid.")
+            print("An error occurred:", e)
 
 
     def runAll(self):
@@ -482,7 +523,7 @@ class Ui_MainWindow(object):
         # self.run_all_video_3.start()
         self.run_all_video_1.update_status.connect(self.updateImage)
         # self.run_all_video_1.update_status.connect(self.updateStatus)
-        self.label_show_guide.setText("======> Finish <======")
+        # self.label_show_guide.setText("======> Finish <======")
 
 
     # DEBUG using Qprocess
@@ -520,12 +561,15 @@ class Ui_MainWindow(object):
 
 
     def updateImage(self, infor):
-        image = cv2.resize(infor["image"], (self.WindowShowVideo.width(), self.WindowShowVideo.height()),
-                           interpolation=cv2.INTER_AREA)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = QtGui.QImage(image, image.shape[1], image.shape[0], image.strides[0], QtGui.QImage.Format.Format_RGB888)
-        self.WindowShowVideo.setPixmap(QtGui.QPixmap.fromImage(image))
-        QtWidgets.QApplication.processEvents()
+        if infor["finish"]:
+            self.label_show_guide.setText("======> Finish <======")
+        else:
+            image = cv2.resize(infor["image"], (self.WindowShowVideo.width(), self.WindowShowVideo.height()),
+                               interpolation=cv2.INTER_AREA)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = QtGui.QImage(image, image.shape[1], image.shape[0], image.strides[0], QtGui.QImage.Format.Format_RGB888)
+            self.WindowShowVideo.setPixmap(QtGui.QPixmap.fromImage(image))
+            QtWidgets.QApplication.processEvents()
 
 
 
@@ -534,38 +578,40 @@ class Ui_MainWindow(object):
         global filename
         global rows_prop
         global cols_prop
-
-        if self.start:
+        try:
+            if self.start:
+                self.start = False
+                self.Capture.setText("Play")
+                return
+            else:
+                self.start = True
+                self.Capture.setText("Stop")
+            cap = cv2.VideoCapture(filename)
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    # End of video — keep last displayed frame
+                    break
+                self.current_frame = frame
+                image = cv2.resize(self.current_frame, (self.WindowShowVideo.width(), self.WindowShowVideo.height()),
+                                interpolation=cv2.INTER_AREA)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image = QtGui.QImage(image, image.shape[1], image.shape[0], image.strides[0], QtGui.QImage.Format.Format_RGB888)
+                self.WindowShowVideo.setPixmap(QtGui.QPixmap.fromImage(image))
+                QtWidgets.QApplication.processEvents()
+                if not self.start:
+                    break
+            cap.release()
             self.start = False
-            self.Capture.setText("Start")
-        else:
-            self.start = True
-            self.Capture.setText("Stop")
-        cap = cv2.VideoCapture(filename)
-        while (cap.isOpened()):
-            # try:
-            _, frame = cap.read()
-            # cv2.imshow("Image",  frame)
-            # cv2.waitKey(0)
-            self.current_frame = frame
-            image = cv2.resize(frame, (self.WindowShowVideo.width(), self.WindowShowVideo.height()),
-                               interpolation=cv2.INTER_AREA)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image = QtGui.QImage(image, image.shape[1], image.shape[0], image.strides[0], QtGui.QImage.Format.Format_RGB888)
-            self.WindowShowVideo.setPixmap(QtGui.QPixmap.fromImage(image))
-            QtWidgets.QApplication.processEvents()
-            # except Exception as e:
-            #     print("An error occurred:", e)
-            #
-            key = cv2.waitKey(1) & 0xFF
-            if self.start == False:
-                break
-                print('Stop play video')
-
-        rows = self.current_frame.shape[0]
-        cols = self.current_frame.shape[1]
-        rows_prop = rows / self.WindowShowVideo.height()
-        cols_prop = cols / self.WindowShowVideo.width()
+            self.Capture.setText("Play")
+            if self.current_frame is not None:
+                rows = self.current_frame.shape[0]
+                cols = self.current_frame.shape[1]
+                rows_prop = rows / self.WindowShowVideo.height()
+                cols_prop = cols / self.WindowShowVideo.width()
+        except Exception as e:
+            self.label_show_guide.setText("Make sure the video was loaded before playing.")
+            print("An error occurred:", e)
 
 
     # def loadVideo(self):
